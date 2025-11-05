@@ -1,0 +1,6 @@
+{
+  "watch": ["backend"],
+  "ext": "ts,js,json",
+  "exec": "tsup --onSuccess \"node .\"",
+  "verbose": false
+}

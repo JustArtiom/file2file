@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "rootDir": "./backend",
+    "outDir": "./dist_backend",
+
+    "target": "esnext",
+    "lib": ["esnext"],
+    "module": "esnext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["backend/**/*"],
+}
