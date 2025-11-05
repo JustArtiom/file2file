@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+const DATA_CHANNEL_CHUNK_SIZE = 256 * 1024;
+const DATA_CHANNEL_HIGH_WATER = 8 * 1024 * 1024;
+const DATA_CHANNEL_LOW_WATER = 2 * 1024 * 1024;
 
 type SenderStatus = "idle" | "creating" | "waiting" | "transferring" | "complete" | "error";
 type ReceiverStatus = "connecting" | "waiting" | "establishing" | "receiving" | "complete" | "error";
@@ -177,7 +180,7 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
 
       const channel = peer.createDataChannel("file", { ordered: true });
       channel.binaryType = "arraybuffer";
-      channel.bufferedAmountLowThreshold = 512 * 1024;
+      channel.bufferedAmountLowThreshold = DATA_CHANNEL_LOW_WATER;
       dataChannelRef.current = channel;
 
       channel.onopen = () => {
@@ -1038,12 +1041,11 @@ async function sendFileOverChannel(
     }),
   );
 
-  const chunkSize = 64 * 1024;
   let offset = 0;
 
   const waitForDrain = () =>
     new Promise<void>((resolve) => {
-      if (channel.bufferedAmount <= 512 * 1024 || channel.readyState !== "open") {
+      if (channel.bufferedAmount <= DATA_CHANNEL_LOW_WATER || channel.readyState !== "open") {
         resolve();
         return;
       }
@@ -1069,13 +1071,13 @@ async function sendFileOverChannel(
       throw new Error("Data channel closed during transfer");
     }
 
-    const slice = file.slice(offset, offset + chunkSize);
+    const slice = file.slice(offset, offset + DATA_CHANNEL_CHUNK_SIZE);
     const buffer = await slice.arrayBuffer();
     channel.send(buffer);
     offset += buffer.byteLength;
     onProgress(offset);
 
-    if (channel.bufferedAmount > 1024 * 1024) {
+    if (channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER) {
       await waitForDrain();
     }
   }
