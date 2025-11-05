@@ -1,5 +1,5 @@
 import type { Server } from 'http';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 
 type PeerRole = 'sender' | 'receiver';
 
