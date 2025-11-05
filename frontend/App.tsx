@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
-const DATA_CHANNEL_CHUNK_SIZE = 128 * 1024;
-const DATA_CHANNEL_HIGH_WATER = 4 * 1024 * 1024;
-const DATA_CHANNEL_LOW_WATER = 1 * 1024 * 1024;
+const DATA_CHANNEL_CHUNK_SIZE = 256 * 1024;
+const DATA_CHANNEL_HIGH_WATER = 8 * 1024 * 1024;
+const DATA_CHANNEL_LOW_WATER = 2 * 1024 * 1024;
 
-type SenderStatus = "idle" | "creating" | "waiting" | "transferring" | "complete" | "error";
+type SenderStatus =
+  | "idle"
+  | "creating"
+  | "waiting"
+  | "transferring"
+  | "finalizing"
+  | "complete"
+  | "error";
 type ReceiverStatus = "connecting" | "waiting" | "establishing" | "receiving" | "complete" | "error";
 
 type FileMetadata = {
@@ -60,6 +67,11 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
   const errorRef = useRef<string | null>(null);
   const closingRef = useRef(false);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const ackStateRef = useRef<{
+    resolve: (() => void) | null;
+    reject: ((error: Error) => void) | null;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>({ resolve: null, reject: null, timer: null });
 
   useEffect(() => {
     fileRef.current = file;
@@ -76,6 +88,58 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
   useEffect(() => {
     errorRef.current = error;
   }, [error]);
+
+  function clearAckTimer() {
+    const timer = ackStateRef.current.timer;
+    if (timer) {
+      clearTimeout(timer);
+      ackStateRef.current.timer = null;
+    }
+  }
+
+  function resolveAck() {
+    const resolve = ackStateRef.current.resolve;
+    if (resolve) {
+      resolve();
+    }
+  }
+
+  function rejectAck(error: Error) {
+    const reject = ackStateRef.current.reject;
+    if (reject) {
+      reject(error);
+    }
+  }
+
+  function createAckPromise(timeoutMs = 20000) {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+
+      const finishResolve = () => {
+        if (settled) return;
+        settled = true;
+        clearAckTimer();
+        ackStateRef.current.resolve = null;
+        ackStateRef.current.reject = null;
+        resolve();
+      };
+
+      const finishReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearAckTimer();
+        ackStateRef.current.resolve = null;
+        ackStateRef.current.reject = null;
+        reject(err);
+      };
+
+      ackStateRef.current.resolve = finishResolve;
+      ackStateRef.current.reject = finishReject;
+      ackStateRef.current.timer = setTimeout(() => {
+        finishReject(new Error("Receiver did not confirm receipt in time"));
+      }, timeoutMs);
+    });
+  }
 
   const sendSignaling = useCallback((payload: Record<string, unknown>) => {
     const socket = wsRef.current;
@@ -136,6 +200,9 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
 
       wsRef.current = null;
       pendingCandidatesRef.current = [];
+      rejectAck(
+        new Error(notifyCancel ? "Transfer cancelled by sender" : "Connection closed"),
+      );
     },
     [],
   );
@@ -183,26 +250,44 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
       channel.bufferedAmountLowThreshold = DATA_CHANNEL_LOW_WATER;
       dataChannelRef.current = channel;
 
-      channel.onopen = () => {
+      channel.onmessage = (event) => {
+        if (typeof event.data !== "string") return;
+        try {
+          const payload = JSON.parse(event.data) as { type?: string };
+          if (payload.type === "complete-ack") {
+            resolveAck();
+          }
+        } catch (err) {
+          console.warn("Unexpected message from receiver", err);
+        }
+      };
+
+      channel.onopen = async () => {
         setStatus("transferring");
         setBytesSent(0);
         const currentFile = fileRef.current;
         if (!currentFile) return;
-        void sendFileOverChannel(channel, currentFile, setBytesSent)
-          .then(() => {
-            setStatus("complete");
-            setTimeout(() => {
-              cleanup(false);
-            }, 1200);
-          })
-          .catch((err) => {
-            console.error("Failed to send file", err);
-            setError(
-              err instanceof Error ? err.message : "Failed to send file",
-            );
-            setStatus("error");
-            cleanup(true);
-          });
+
+        const ackPromise = createAckPromise();
+        ackPromise.catch(() => undefined);
+
+        try {
+          await sendFileOverChannel(channel, currentFile, setBytesSent);
+          setStatus("finalizing");
+          await ackPromise;
+          setStatus("complete");
+          setTimeout(() => {
+            cleanup(false);
+          }, 1500);
+        } catch (err) {
+          console.error("Failed to send file", err);
+          setError(
+            err instanceof Error ? err.message : "Failed to send file",
+          );
+          setStatus("error");
+          rejectAck(err instanceof Error ? err : new Error("Failed to send file"));
+          cleanup(true);
+        }
       };
 
       channel.onclose = () => {
@@ -214,6 +299,7 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
           if (!errorRef.current) {
             setError("Data channel closed unexpectedly");
           }
+          rejectAck(new Error("Data channel closed before completion"));
         }
       };
 
@@ -458,6 +544,7 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
     creating: "Preparing share link…",
     waiting: "Link ready. Waiting for the receiver to connect.",
     transferring: "Streaming file peer-to-peer… keep this tab open.",
+    finalizing: "Waiting for the receiver to confirm receipt…",
     complete: "Transfer complete! You can start a new share if needed.",
     error: error ?? "Something went wrong.",
   };
@@ -479,7 +566,7 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
           <input
             type="file"
             onChange={onFileChange}
-            disabled={status === "transferring"}
+            disabled={status === "transferring" || status === "finalizing"}
             className="mt-2 block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-medium file:bg-[#e25c49] file:text-white hover:file:bg-[#f06a57] disabled:opacity-50 cursor-pointer"
           />
         </label>
@@ -495,7 +582,7 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
               type="button"
               onClick={reset}
               className="text-[#9aa1a9] hover:text-[#e5e5e5] ml-3"
-              disabled={status === "transferring"}
+              disabled={status === "transferring" || status === "finalizing"}
             >
               Reset
             </button>
@@ -506,7 +593,13 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
           <button
             type="button"
             onClick={generateShare}
-            disabled={!file || status === "creating" || status === "waiting" || status === "transferring"}
+            disabled={
+              !file ||
+              status === "creating" ||
+              status === "waiting" ||
+              status === "transferring" ||
+              status === "finalizing"
+            }
             className="inline-flex items-center justify-center rounded-xl bg-[#e25c49] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[#f06a57] transition"
           >
             {status === "creating" ? "Generating…" : "Generate URL"}
@@ -541,7 +634,7 @@ function SenderView({ signalingUrl }: { signalingUrl: string }) {
           <span>Status</span>
           <span className="text-[#9aa1a9]">{statusMessage[status]}</span>
         </div>
-        {status === "transferring" || status === "complete" ? (
+        {status === "transferring" || status === "finalizing" || status === "complete" ? (
           <div>
             <div className="flex items-center justify-between text-xs text-[#7b828a] mb-1">
               <span>{formatBytes(bytesSent)}</span>
@@ -650,6 +743,17 @@ function ReceiverView({
     }
   }, []);
 
+  const sendCompletionAck = useCallback(async () => {
+    const channel = dataChannelRef.current;
+    if (!channel || channel.readyState !== "open") return;
+    try {
+      channel.send(JSON.stringify({ type: "complete-ack" }));
+      await waitForDataChannelBuffer(channel, 0);
+    } catch (err) {
+      console.error("Failed to send completion acknowledgement", err);
+    }
+  }, []);
+
   const sendSignaling = useCallback(
     (payload: Record<string, unknown>) => {
       const socket = wsRef.current;
@@ -694,6 +798,7 @@ function ReceiverView({
             setStatus("receiving");
           } else if (parsed.type === "complete") {
             finalizeFile();
+            await sendCompletionAck();
             cleanupPeer();
           }
         } catch (err) {
@@ -726,7 +831,7 @@ function ReceiverView({
         }
       }
     },
-    [cleanupPeer, finalizeFile],
+    [cleanupPeer, finalizeFile, sendCompletionAck],
   );
 
   const setupDataChannel = useCallback(
@@ -865,6 +970,7 @@ function ReceiverView({
             const meta = metadataRef.current;
             if (meta && bytesReceivedRef.current >= meta.size) {
               finalizeFile();
+              await sendCompletionAck();
               cleanupPeer();
               break;
             }
@@ -885,7 +991,7 @@ function ReceiverView({
           break;
       }
     },
-    [acceptOffer, cleanupPeer],
+    [acceptOffer, cleanupPeer, sendCompletionAck],
   );
 
   useEffect(() => {
@@ -1058,9 +1164,7 @@ async function sendFileOverChannel(
   file: File,
   onProgress: (bytesSent: number) => void,
 ): Promise<void> {
-  if (channel.readyState !== "open") {
-    throw new Error("Data channel is not open");
-  }
+  assertDataChannelOpen(channel);
 
   channel.send(
     JSON.stringify({
@@ -1097,20 +1201,45 @@ async function sendFileOverChannel(
     });
 
   while (offset < file.size) {
-    if (channel.readyState !== "open") {
-      throw new Error("Data channel closed during transfer");
-    }
+    assertDataChannelOpen(channel);
 
     const slice = file.slice(offset, offset + DATA_CHANNEL_CHUNK_SIZE);
     const buffer = await slice.arrayBuffer();
+    assertDataChannelOpen(channel);
     channel.send(buffer);
     offset += buffer.byteLength;
     onProgress(offset);
 
     if (channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER) {
       await waitForDrain();
+      assertDataChannelOpen(channel);
     }
   }
 
+  await waitForDrain();
+  assertDataChannelOpen(channel);
   channel.send(JSON.stringify({ type: "complete" }));
+  await waitForDataChannelBuffer(channel, 0);
+}
+
+function assertDataChannelOpen(channel: RTCDataChannel): void {
+  if (channel.readyState !== "open") {
+    throw new Error("Data channel closed during transfer");
+  }
+}
+
+async function waitForDataChannelBuffer(
+  channel: RTCDataChannel,
+  threshold: number,
+  interval = 50,
+): Promise<void> {
+  while (channel.readyState === "open" && channel.bufferedAmount > threshold) {
+    await sleep(interval);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
