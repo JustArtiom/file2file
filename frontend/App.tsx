@@ -589,6 +589,7 @@ function ReceiverView({
   const metadataRef = useRef<FileMetadata | null>(null);
   const downloadUrlRef = useRef<string | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const bytesReceivedRef = useRef(0);
 
   useEffect(() => {
     statusRef.current = status;
@@ -608,6 +609,10 @@ function ReceiverView({
     }
     downloadUrlRef.current = downloadUrl;
   }, [downloadUrl]);
+
+  useEffect(() => {
+    bytesReceivedRef.current = bytesReceived;
+  }, [bytesReceived]);
 
   useEffect(() => {
     return () => {
@@ -665,6 +670,8 @@ function ReceiverView({
     const url = URL.createObjectURL(blob);
     setDownloadUrl(url);
     statusRef.current = "complete";
+    bytesReceivedRef.current = meta.size;
+    setBytesReceived(meta.size);
     setStatus("complete");
   }, []);
 
@@ -682,6 +689,7 @@ function ReceiverView({
             };
             chunksRef.current = [];
             setBytesReceived(0);
+            bytesReceivedRef.current = 0;
             setMetadata(meta);
             setStatus("receiving");
           } else if (parsed.type === "complete") {
@@ -696,7 +704,11 @@ function ReceiverView({
 
       if (data instanceof ArrayBuffer) {
         chunksRef.current.push(data);
-        setBytesReceived((prev) => prev + data.byteLength);
+        setBytesReceived((prev) => {
+          const next = prev + data.byteLength;
+          bytesReceivedRef.current = next;
+          return next;
+        });
         return;
       }
 
@@ -704,7 +716,11 @@ function ReceiverView({
         try {
           const buffer = await data.arrayBuffer();
           chunksRef.current.push(buffer);
-          setBytesReceived((prev) => prev + buffer.byteLength);
+          setBytesReceived((prev) => {
+            const next = prev + buffer.byteLength;
+            bytesReceivedRef.current = next;
+            return next;
+          });
         } catch (err) {
           console.error("Failed to read blob chunk", err);
         }
@@ -724,18 +740,24 @@ function ReceiverView({
         setStatus((prev) => (prev === "establishing" ? "receiving" : prev));
       };
       channel.onclose = () => {
-        if (
-          statusRef.current !== "complete" &&
-          statusRef.current !== "error"
-        ) {
-          setStatus("error");
-          if (!errorRef.current) {
-            setError("Data channel closed unexpectedly");
-          }
+        if (statusRef.current === "complete" || statusRef.current === "error") {
+          return;
+        }
+
+        const meta = metadataRef.current;
+        if (meta && bytesReceivedRef.current >= meta.size) {
+          finalizeFile();
+          cleanupPeer();
+          return;
+        }
+
+        setStatus("error");
+        if (!errorRef.current) {
+          setError("Data channel closed unexpectedly");
         }
       };
     },
-    [handleDataChannelMessage],
+    [cleanupPeer, finalizeFile, handleDataChannelMessage],
   );
 
   const acceptOffer = useCallback(
@@ -837,11 +859,19 @@ function ReceiverView({
           if (data.role === "sender") {
             if (statusRef.current === "complete") {
               setStatus("complete");
-            } else {
-              setError("Sender disconnected");
-              setStatus("error");
-              cleanupPeer();
+              break;
             }
+
+            const meta = metadataRef.current;
+            if (meta && bytesReceivedRef.current >= meta.size) {
+              finalizeFile();
+              cleanupPeer();
+              break;
+            }
+
+            setError("Sender disconnected");
+            setStatus("error");
+            cleanupPeer();
           }
           break;
         case "error":
