@@ -1,0 +1,54 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - 'main'
+
+jobs:
+  all:
+    name: CI/CD workflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Lint Code
+        run: npx eslint .
+
+      - name: Deploy Backend
+        uses: JustArtiom/ptero-deploy@v1
+        with:
+          url: ${{ secrets.PTERO_URL }}
+          api_key: ${{ secrets.PTERO_API_KEY }}
+          server_id: ${{ secrets.PTERO_BACKEND_SERVER_ID }}
+          clean: true
+          run: |
+            npm install
+            npm run build:backend
+            npx pm2 start dist_backend/index.js --name "backend"
+            clear
+            npx pm2 logs backend
+
+      - name: Build Frontend
+        run: |
+          npm run build:frontend
+
+      - name: Deploy Frontend
+        uses: JustArtiom/ptero-deploy@v1
+        with:
+          url: ${{ secrets.PTERO_URL }}
+          api_key: ${{ secrets.PTERO_API_KEY }}
+          server_id: ${{ secrets.PTERO_FRONTEND_SERVER_ID }}
+          base_path: ./dist_frontend
+          destination_path: ./www
+          restart: false
+          clean: true
