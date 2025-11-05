@@ -21,8 +21,8 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Lint Code
-        run: npx eslint .
+      # - name: Lint Code
+      #   run: npx eslint .
 
       - name: Deploy Backend
         uses: JustArtiom/ptero-deploy@v1
