@@ -1028,9 +1028,7 @@ async function sendFileOverChannel(
   file: File,
   onProgress: (bytesSent: number) => void,
 ): Promise<void> {
-  if (channel.readyState !== "open") {
-    throw new Error("Data channel is not open");
-  }
+  assertDataChannelOpen(channel);
 
   channel.send(
     JSON.stringify({
@@ -1067,20 +1065,27 @@ async function sendFileOverChannel(
     });
 
   while (offset < file.size) {
-    if (channel.readyState !== "open") {
-      throw new Error("Data channel closed during transfer");
-    }
+    assertDataChannelOpen(channel);
 
     const slice = file.slice(offset, offset + DATA_CHANNEL_CHUNK_SIZE);
     const buffer = await slice.arrayBuffer();
+    assertDataChannelOpen(channel);
     channel.send(buffer);
     offset += buffer.byteLength;
     onProgress(offset);
 
     if (channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER) {
       await waitForDrain();
+      assertDataChannelOpen(channel);
     }
   }
 
+  assertDataChannelOpen(channel);
   channel.send(JSON.stringify({ type: "complete" }));
+}
+
+function assertDataChannelOpen(channel: RTCDataChannel): void {
+  if (channel.readyState !== "open") {
+    throw new Error("Data channel closed during transfer");
+  }
 }
