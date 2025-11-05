@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
-const DATA_CHANNEL_CHUNK_SIZE = 256 * 1024;
-const DATA_CHANNEL_HIGH_WATER = 8 * 1024 * 1024;
-const DATA_CHANNEL_LOW_WATER = 2 * 1024 * 1024;
+const DATA_CHANNEL_CHUNK_SIZE = 512 * 1024;
+const DATA_CHANNEL_HIGH_WATER = 16 * 1024 * 1024;
+const DATA_CHANNEL_LOW_WATER = 4 * 1024 * 1024;
 
 type SenderStatus = "idle" | "creating" | "waiting" | "transferring" | "complete" | "error";
 type ReceiverStatus = "connecting" | "waiting" | "establishing" | "receiving" | "complete" | "error";
