@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
-const DATA_CHANNEL_CHUNK_SIZE = 512 * 1024;
-const DATA_CHANNEL_HIGH_WATER = 16 * 1024 * 1024;
-const DATA_CHANNEL_LOW_WATER = 4 * 1024 * 1024;
+const DATA_CHANNEL_CHUNK_SIZE = 256 * 1024;
+const DATA_CHANNEL_HIGH_WATER = 8 * 1024 * 1024;
+const DATA_CHANNEL_LOW_WATER = 2 * 1024 * 1024;
 
 type SenderStatus = "idle" | "creating" | "waiting" | "transferring" | "complete" | "error";
 type ReceiverStatus = "connecting" | "waiting" | "establishing" | "receiving" | "complete" | "error";
@@ -1028,7 +1028,9 @@ async function sendFileOverChannel(
   file: File,
   onProgress: (bytesSent: number) => void,
 ): Promise<void> {
-  assertDataChannelOpen(channel);
+  if (channel.readyState !== "open") {
+    throw new Error("Data channel is not open");
+  }
 
   channel.send(
     JSON.stringify({
@@ -1065,27 +1067,20 @@ async function sendFileOverChannel(
     });
 
   while (offset < file.size) {
-    assertDataChannelOpen(channel);
+    if (channel.readyState !== "open") {
+      throw new Error("Data channel closed during transfer");
+    }
 
     const slice = file.slice(offset, offset + DATA_CHANNEL_CHUNK_SIZE);
     const buffer = await slice.arrayBuffer();
-    assertDataChannelOpen(channel);
     channel.send(buffer);
     offset += buffer.byteLength;
     onProgress(offset);
 
     if (channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER) {
       await waitForDrain();
-      assertDataChannelOpen(channel);
     }
   }
 
-  assertDataChannelOpen(channel);
   channel.send(JSON.stringify({ type: "complete" }));
-}
-
-function assertDataChannelOpen(channel: RTCDataChannel): void {
-  if (channel.readyState !== "open") {
-    throw new Error("Data channel closed during transfer");
-  }
 }
